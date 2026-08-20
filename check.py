@@ -1,69 +1,239 @@
 # -*- coding: utf-8 -*-
-"""유력 창구들의 응답 내용을 그대로 펼쳐본다 (마지막 정찰)."""
-import json
+"""
+CGV 광교 · 오디세이 · IMAX 예매 오픈 알림 봇 (완성판)
+"""
+import json, os, re
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from urllib import request, error
 from urllib.parse import urlencode
 
-BASE = "https://cgv.co.kr/api/v1/booking/"
-CO, MOV, SITE, IMAX = "A420", "30001323", "0257", "04"
+CO = os.environ.get("CO_CD", "A420")
+SITE = os.environ.get("SITE_NO", "0257")          # 광교
+SITE_NM = os.environ.get("THEATER_NAME", "CGV 광교")
+MOVIE = os.environ.get("MOVIE_KEYWORD", "오디세이")
+MOV_FALLBACK = os.environ.get("MOV_NO", "30001323")
+SCREEN = os.environ.get("SCREEN_KEYWORD", "IMAX")
+IMAX_ATTR = os.environ.get("IMAX_ATTR_CD", "04")
+WEBHOOK = os.environ.get("TEAMS_WEBHOOK_URL", "").strip()
+BOOK_URL = "https://cgv.co.kr/cnm/movieBook/movie"
+
+API = "https://cgv.co.kr/api/v1/booking/"
 KST = timezone(timedelta(hours=9))
-TODAY = datetime.now(KST).strftime("%Y%m%d")
+STATE = Path("state.json")
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
 
 
-def get(name, params):
-    url = BASE + name + "?" + urlencode(params, encoding="utf-8")
+def log(m):
+    print(f"[{datetime.now(KST):%H:%M:%S}] {m}", flush=True)
+
+
+def api(name, params, timeout=15):
+    url = API + name + "?" + urlencode(params, encoding="utf-8")
     req = request.Request(url, headers={
         "User-Agent": UA, "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-        "Referer": "https://cgv.co.kr/cnm/movieBook/movie"})
+        "Accept-Language": "ko-KR,ko;q=0.9", "Referer": BOOK_URL})
     try:
-        with request.urlopen(req, timeout=15) as r:
-            return r.status, r.read().decode("utf-8", "replace")
+        with request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode("utf-8", "replace"))
     except error.HTTPError as e:
-        try: return e.code, e.read().decode("utf-8", "replace")
-        except Exception: return e.code, ""
+        try:
+            return e.code, json.loads(e.read().decode("utf-8", "replace"))
+        except Exception:
+            return e.code, None
     except Exception as e:
-        return 0, f"{type(e).__name__}"
+        log(f"  통신 오류 {name}: {type(e).__name__}")
+        return 0, None
 
 
-P_MOVSITE = {"coCd": CO, "movNo": MOV, "siteNo": SITE}
-P_SITE = {"coCd": CO, "siteNo": SITE}
-P_IMAX = {"coCd": CO, "movNo": MOV, "siteNo": SITE, "div": "CUST_EXPO_MOVTYP_CD", "attrCd": IMAX}
-P_YMD = {"coCd": CO, "movNo": MOV, "siteNo": SITE, "scnYmd": TODAY}
+def find_mov_no():
+    st, js = api("searchAtktTopPostrList", {"coCd": CO, "movNm": "", "div": "", "attrCd": ""})
+    if st == 200 and js:
+        for rec in js.get("data") or []:
+            if isinstance(rec, dict) and MOVIE in str(rec.get("movNm", "")):
+                no = str(rec.get("movNo") or "")
+                if no:
+                    log(f"영화 '{rec.get('movNm')}' → movNo={no}")
+                    return no
+    log(f"영화번호를 목록에서 못 찾아 기본값 사용: {MOV_FALLBACK}")
+    return MOV_FALLBACK
 
-TARGETS = [
-    ("searchSiteScnscYmdListByMov", P_MOVSITE, 4000),
-    ("searchSiteScnscYmdListBySite", P_SITE, 4000),
-    ("searchSscnsSchdExistList", P_MOVSITE, 4000),
-    ("searchLastScnDay", P_MOVSITE, 2000),
-    ("searchSscnsCdList", P_MOVSITE, 3000),
-    ("searchSscnsSchdCntList", P_MOVSITE, 4000),
-    ("searchScnsMngList", P_MOVSITE, 2000),
-    ("searchSchByMov", P_YMD, 3000),
-    ("searchMovScnInfo", P_YMD, 3000),
-    ("searchSiteScnscYmdListByMov", P_IMAX, 2000),
-]
 
-print(f"오늘={TODAY}  영화={MOV}(오디세이)  극장={SITE}(광교)  IMAX={IMAX}")
+def get_dates(mov_no):
+    st, js = api("searchSiteScnscYmdListByMov",
+                 {"coCd": CO, "movNo": mov_no, "siteNo": SITE,
+                  "div": "CUST_EXPO_MOVTYP_CD", "attrCd": IMAX_ATTR})
+    if st != 200 or not js:
+        log(f"날짜 조회 실패 (status={st})")
+        return []
+    out = []
+    for rec in js.get("data") or []:
+        y = str((rec or {}).get("scnYmd") or "")
+        if re.fullmatch(r"20\d{6}", y):
+            out.append(y)
+    return sorted(set(out))
 
-for name, p, limit in TARGETS:
-    st, raw = get(name, p)
-    print("\n" + "=" * 74)
-    print(f"■ {name}")
-    print(f"  파라미터: {p}")
-    print(f"  status={st} 길이={len(raw)}")
-    if st != 200:
-        print("  본문:", raw[:400]); continue
-    try:
-        pretty = json.dumps(json.loads(raw), ensure_ascii=False, indent=1)
-    except Exception:
-        pretty = raw
-    print(pretty[:limit])
-    if len(pretty) > limit:
-        print(f"  ...(뒤에 {len(pretty)-limit}자 더 있음)")
 
-print("\n" + "=" * 74)
-print("끝.")
+SCOPES = ["01", "02", "03", "04", "05", "00", "1", "2", "3", "10", "20"]
+
+
+def times_for(mov_no, ymd, scope_cache):
+    scopes = [scope_cache[0]] if scope_cache[0] else SCOPES
+    for scope in scopes:
+        st, js = api("searchSchByMov", {"coCd": CO, "movNo": mov_no, "siteNo": SITE,
+                                        "scnYmd": ymd, "rtctlScopCd": scope})
+        if st != 200 or not js or not js.get("data"):
+            continue
+        if not scope_cache[0]:
+            scope_cache[0] = scope
+            log(f"★ 시간표 창구 열림! rtctlScopCd={scope}")
+            log(f"  응답 견본: {json.dumps(js['data'], ensure_ascii=False)[:900]}")
+        return extract_times(js["data"])
+    return []
+
+
+TIME_RE = re.compile(r"^([01]\d|2[0-3])[:]?([0-5]\d)$")
+POS_KEY = re.compile(r"(strt|start|bgn|begin)|(tm|time)$", re.I)
+NEG_KEY = re.compile(r"(end|fnsh|finish|cls|close|term|rmn|seat)", re.I)
+
+
+def _is_start_time(key, val):
+    if not isinstance(val, str):
+        return None
+    m = TIME_RE.match(val.strip())
+    if not m:
+        return None
+    if NEG_KEY.search(key) or not POS_KEY.search(key):
+        return None
+    return f"{m.group(1)}:{m.group(2)}"
+
+
+def extract_times(data):
+    found = set()
+
+    def mentions_imax(d):
+        for v in d.values():
+            if isinstance(v, str) and (SCREEN.upper() in v.upper() or "아이맥스" in v):
+                return True
+        return False
+
+    def collect(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                t = _is_start_time(k, v)
+                if t:
+                    found.add(t)
+                elif isinstance(v, (dict, list)):
+                    collect(v)
+        elif isinstance(o, list):
+            for v in o:
+                collect(v)
+
+    def walk(o, inside=False):
+        if isinstance(o, dict):
+            if inside or mentions_imax(o):
+                collect(o)
+                return
+            for v in o.values():
+                walk(v, inside)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, inside)
+
+    walk(data)
+    return sorted(found)
+
+
+def load():
+    if STATE.exists():
+        try:
+            return set(json.loads(STATE.read_text(encoding="utf-8")).get("slots", []))
+        except Exception:
+            pass
+    return set()
+
+
+def save(slots):
+    STATE.write_text(json.dumps(
+        {"updated": datetime.now(KST).isoformat(), "count": len(slots), "slots": sorted(slots)},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def pretty(ymd):
+    return f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}" if re.fullmatch(r"20\d{6}", ymd) else ymd
+
+
+def notify(new, total, mode):
+    if not WEBHOOK:
+        log("웹후크가 없어 알림 생략")
+        return
+    by = {}
+    for s in sorted(new):
+        d, _, t = s.partition(" ")
+        by.setdefault(pretty(d), []).append(t)
+    lines = [f"**{d}**" + (f"  {'  '.join(t for t in ts if t)}" if any(ts) else "  (날짜 오픈)")
+             for d, ts in sorted(by.items())]
+    text = "\n\n".join(lines[:20])
+
+    card = {"type": "message", "attachments": [{
+        "contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None,
+        "content": {"type": "AdaptiveCard",
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "version": "1.4",
+                    "body": [
+                        {"type": "TextBlock", "size": "Medium", "weight": "Bolder", "wrap": True,
+                         "text": f"🎬 {SITE_NM} {SCREEN} · 「{MOVIE}」 예매 새로 열렸어요!"},
+                        {"type": "TextBlock", "wrap": True, "spacing": "Small",
+                         "text": f"새로 열린 것 **{len(new)}건** · 현재 전체 {total}건 ({mode})"},
+                        {"type": "TextBlock", "wrap": True, "text": text},
+                        {"type": "TextBlock", "isSubtle": True, "size": "Small", "wrap": True,
+                         "text": f"확인 {datetime.now(KST):%m/%d %H:%M} KST"}],
+                    "actions": [{"type": "Action.OpenUrl", "title": "CGV에서 예매하기", "url": BOOK_URL}],
+                    "msteams": {"width": "Full"}}}]}
+    body = json.dumps(card, ensure_ascii=False).encode("utf-8")
+    req = request.Request(WEBHOOK, data=body,
+                          headers={"Content-Type": "application/json; charset=utf-8"})
+    with request.urlopen(req, timeout=30) as r:
+        log(f"✅ Teams 알림 전송 (응답 {r.status})")
+
+
+def main():
+    log(f"감시: {SITE_NM}({SITE}) / {MOVIE} / {SCREEN}")
+    mov = find_mov_no()
+    dates = get_dates(mov)
+    if not dates:
+        log("❌ 예매 가능 날짜를 못 받았어요. 이번 회차는 건너뜁니다.")
+        return
+    log(f"예매 가능 날짜 {len(dates)}일: {dates[0]} ~ {dates[-1]}")
+
+    scope = [None]
+    slots, mode = set(), "날짜 기준"
+    for ymd in dates:
+        ts = times_for(mov, ymd, scope)
+        if ts:
+            mode = "회차 기준"
+            for t in ts:
+                slots.add(f"{ymd} {t}")
+        else:
+            slots.add(f"{ymd} ")
+    if scope[0] is None:
+        log("시간표 창구는 아직 못 열었어요 → 날짜 단위로 감시합니다 (충분히 동작해요)")
+    log(f"이번 확인: {len(slots)}건 ({mode})")
+
+    known = load()
+    new = slots - known
+    if not known:
+        log("첫 실행 → 지금 상태를 기준으로 저장만 (알림 없음)")
+        save(slots)
+        return
+    if new:
+        log(f"🎉 새로 열린 것 {len(new)}건: {sorted(new)[:10]}")
+        notify(new, len(slots), mode)
+    else:
+        log("변화 없음")
+    save(known | slots)
+
+
+if __name__ == "__main__":
+    main()
