@@ -1,1 +1,65 @@
+name: CGV 광교 오디세이 IMAX 감시
 
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cgv-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: 코드 가져오기
+        uses: actions/checkout@v4
+
+      - name: 파이썬 준비
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 브라우저 캐시 불러오기
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-v1
+
+      - name: 필요한 것 설치
+        run: |
+          pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+
+      - name: CGV 확인하기
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          CGV_URL: ${{ vars.CGV_URL || 'https://cgv.co.kr/cnm/movieBook/movie' }}
+          MOVIE_KEYWORD: ${{ vars.MOVIE_KEYWORD || '오디세이' }}
+          SCREEN_KEYWORD: ${{ vars.SCREEN_KEYWORD || 'IMAX' }}
+          THEATER_KEYWORD: ${{ vars.THEATER_KEYWORD || '광교' }}
+          THEATER_NAME: ${{ vars.THEATER_NAME || 'CGV 광교' }}
+        run: python check.py
+
+      - name: 화면 캡처·기록 보관 (문제 확인용)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ github.run_number }}
+          path: debug/
+          retention-days: 5
+          if-no-files-found: ignore
+
+      - name: 기억(state.json) 저장
+        if: success()
+        run: |
+          git config user.name "cgv-bot"
+          git config user.email "cgv-bot@users.noreply.github.com"
+          git add state.json
+          git diff --staged --quiet || git commit -m "기억 갱신 [skip ci]"
+          git push || echo "밀어넣기 실패(다음 실행에서 다시 시도)"
