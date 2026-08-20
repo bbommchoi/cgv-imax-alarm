@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""시간표 창구 확정 - 후보 창구 x 파라미터 조합을 두드려본다."""
+"""유력 창구들의 응답 내용을 그대로 펼쳐본다 (마지막 정찰)."""
 import json
 from datetime import datetime, timezone, timedelta
 from urllib import request, error
@@ -29,38 +29,41 @@ def get(name, params):
         return 0, f"{type(e).__name__}"
 
 
-ENDPOINTS = ["searchSchByMov", "searchSiteScnscYmdListByMov", "searchSiteScnscYmdListBySite",
-             "searchSscnsSchdExistList", "searchSscnsSchdCntList", "searchLastScnDay",
-             "searchMovScnInfo", "searchScnsMngList", "searchSscnsCdList", "searchRcmdSpclfmtInfo"]
+P_MOVSITE = {"coCd": CO, "movNo": MOV, "siteNo": SITE}
+P_SITE = {"coCd": CO, "siteNo": SITE}
+P_IMAX = {"coCd": CO, "movNo": MOV, "siteNo": SITE, "div": "CUST_EXPO_MOVTYP_CD", "attrCd": IMAX}
+P_YMD = {"coCd": CO, "movNo": MOV, "siteNo": SITE, "scnYmd": TODAY}
 
-PARAMSETS = [
-    ("기본", {"coCd": CO, "movNo": MOV}),
-    ("극장", {"coCd": CO, "movNo": MOV, "siteNo": SITE}),
-    ("극장만", {"coCd": CO, "siteNo": SITE}),
-    ("날짜", {"coCd": CO, "movNo": MOV, "siteNo": SITE, "scnYmd": TODAY}),
-    ("playYmd", {"coCd": CO, "movNo": MOV, "siteNo": SITE, "playYmd": TODAY}),
-    ("IMAX", {"coCd": CO, "movNo": MOV, "siteNo": SITE, "div": "CUST_EXPO_MOVTYP_CD", "attrCd": IMAX}),
+TARGETS = [
+    ("searchSiteScnscYmdListByMov", P_MOVSITE, 4000),
+    ("searchSiteScnscYmdListBySite", P_SITE, 4000),
+    ("searchSscnsSchdExistList", P_MOVSITE, 4000),
+    ("searchLastScnDay", P_MOVSITE, 2000),
+    ("searchSscnsCdList", P_MOVSITE, 3000),
+    ("searchSscnsSchdCntList", P_MOVSITE, 4000),
+    ("searchScnsMngList", P_MOVSITE, 2000),
+    ("searchSchByMov", P_YMD, 3000),
+    ("searchMovScnInfo", P_YMD, 3000),
+    ("searchSiteScnscYmdListByMov", P_IMAX, 2000),
 ]
 
-print(f"오늘={TODAY} / 영화={MOV} / 극장={SITE} / IMAX={IMAX}")
-print("=" * 74)
-good = []
+print(f"오늘={TODAY}  영화={MOV}(오디세이)  극장={SITE}(광교)  IMAX={IMAX}")
 
-for ep in ENDPOINTS:
-    print(f"\n■ {ep}")
-    for tag, p in PARAMSETS:
-        st, raw = get(ep, p)
-        if st == 404:
-            print(f"   404  ({tag}) 창구 없음")
-            break
-        short = raw.replace("\n", " ")[:330]
-        flag = "OK " if st == 200 else "-- "
-        print(f"   {flag}{st} ({tag}) {short}")
-        if st == 200 and '"data":null' not in raw and len(raw) > 60:
-            good.append((ep, tag, len(raw)))
+for name, p, limit in TARGETS:
+    st, raw = get(name, p)
+    print("\n" + "=" * 74)
+    print(f"■ {name}")
+    print(f"  파라미터: {p}")
+    print(f"  status={st} 길이={len(raw)}")
+    if st != 200:
+        print("  본문:", raw[:400]); continue
+    try:
+        pretty = json.dumps(json.loads(raw), ensure_ascii=False, indent=1)
+    except Exception:
+        pretty = raw
+    print(pretty[:limit])
+    if len(pretty) > limit:
+        print(f"  ...(뒤에 {len(pretty)-limit}자 더 있음)")
 
 print("\n" + "=" * 74)
-print("★ 내용이 들어있던 조합:")
-for g in good:
-    print("   ", g)
-print("=" * 74)
+print("끝.")
