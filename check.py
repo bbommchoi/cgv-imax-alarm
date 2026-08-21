@@ -22,6 +22,8 @@ SCREEN = os.environ.get("SCREEN_KEYWORD", "IMAX")
 IMAX_ATTR = os.environ.get("IMAX_ATTR_CD", "04")
 WEBHOOK = os.environ.get("TEAMS_WEBHOOK_URL", "").strip()
 BOOK_URL = "https://cgv.co.kr/cnm/movieBook/movie"
+# 이 날짜(KST, YYYYMMDD)까지는 변화가 없어도 "이상 없음" 을 알려준다. 지나면 자동으로 조용해짐.
+HEARTBEAT_UNTIL = os.environ.get("HEARTBEAT_UNTIL", "20260821")
 
 API = "https://cgv.co.kr/api/v1/booking/"
 KST = timezone(timedelta(hours=9))
@@ -213,6 +215,41 @@ def notify(new, total, mode):
         log(f"✅ Teams 알림 전송 (응답 {r.status})")
 
 
+def heartbeat(total, mode, dates):
+    """변화가 없을 때 보내는 '이상 없음' 알림 (HEARTBEAT_UNTIL 까지만)."""
+    today = datetime.now(KST).strftime("%Y%m%d")
+    if today > HEARTBEAT_UNTIL:
+        return
+    if not WEBHOOK:
+        log("웹후크가 없어 이상없음 알림 생략")
+        return
+    span = f"{pretty(dates[0])} ~ {pretty(dates[-1])}" if dates else "-"
+    card = {"type": "message", "attachments": [{
+        "contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None,
+        "content": {"type": "AdaptiveCard",
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "version": "1.4",
+                    "body": [
+                        {"type": "TextBlock", "wrap": True, "weight": "Bolder",
+                         "text": f"✅ 확인 완료 · 새로 열린 회차 없음"},
+                        {"type": "FactSet", "facts": [
+                            {"title": "대상", "value": f"{SITE_NM} {SCREEN} · 「{MOVIE}」"},
+                            {"title": "현재", "value": f"{total}건 ({mode})"},
+                            {"title": "예매 가능", "value": span},
+                            {"title": "확인 시각", "value": f"{datetime.now(KST):%m/%d %H:%M} KST"}]},
+                        {"type": "TextBlock", "isSubtle": True, "size": "Small", "wrap": True,
+                         "text": f"이 확인 알림은 {pretty(HEARTBEAT_UNTIL)} 까지만 옵니다."}],
+                    "msteams": {"width": "Full"}}}]}
+    body = json.dumps(card, ensure_ascii=False).encode("utf-8")
+    req = request.Request(WEBHOOK, data=body,
+                          headers={"Content-Type": "application/json; charset=utf-8"})
+    try:
+        with request.urlopen(req, timeout=30) as r:
+            log(f"🟢 이상없음 알림 전송 (응답 {r.status})")
+    except Exception as e:
+        log(f"이상없음 알림 실패: {type(e).__name__}")
+
+
 # ---------------- main
 def main():
     log(f"감시: {SITE_NM}({SITE}) / {MOVIE} / {SCREEN}")
@@ -246,13 +283,16 @@ def main():
     if not known:
         log("첫 실행 → 지금 상태를 기준으로 저장만 (알림 없음)")
         save(slots)
+        heartbeat(len(slots), mode, dates)
         return
     if new:
         log(f"🎉 새로 열린 것 {len(new)}건: {sorted(new)[:10]}")
         notify(new, len(slots), mode)
     else:
         log("변화 없음")
-    save(slots if mode == "회차 기준" else (known | slots))
+        heartbeat(len(slots), mode, dates)
+    if slots != known:
+        save(slots if mode == "회차 기준" else (known | slots))
 
 
 if __name__ == "__main__":
