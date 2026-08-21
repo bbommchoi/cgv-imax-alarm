@@ -23,7 +23,7 @@ IMAX_ATTR = os.environ.get("IMAX_ATTR_CD", "04")
 WEBHOOK = os.environ.get("TEAMS_WEBHOOK_URL", "").strip()
 BOOK_URL = "https://cgv.co.kr/cnm/movieBook/movie"
 # 이 날짜(KST, YYYYMMDD)까지는 변화가 없어도 "이상 없음" 을 알려준다. 지나면 자동으로 조용해짐.
-HEARTBEAT_UNTIL = os.environ.get("HEARTBEAT_UNTIL", "20260821")
+HEARTBEAT_UNTIL = os.environ.get("HEARTBEAT_UNTIL", "20000101")
 
 API = "https://cgv.co.kr/api/v1/booking/"
 KST = timezone(timedelta(hours=9))
