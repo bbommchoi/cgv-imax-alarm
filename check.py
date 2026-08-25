@@ -23,7 +23,9 @@ IMAX_ATTR = os.environ.get("IMAX_ATTR_CD", "04")
 WEBHOOK = os.environ.get("TEAMS_WEBHOOK_URL", "").strip()
 BOOK_URL = "https://cgv.co.kr/cnm/movieBook/movie"
 # 이 날짜(KST, YYYYMMDD)까지는 변화가 없어도 "이상 없음" 을 알려준다. 지나면 자동으로 조용해짐.
-HEARTBEAT_UNTIL = os.environ.get("HEARTBEAT_UNTIL", "20000101")
+HEARTBEAT_UNTIL = os.environ.get("HEARTBEAT_UNTIL", "20000101")   # 과거 날짜 = 확인 알림 끔
+RANGE_DAYS = int(os.environ.get("RANGE_DAYS", "40"))    # 오늘부터 며칠 앞까지 직접 확인할지
+EMPTY_STOP = int(os.environ.get("EMPTY_STOP", "10"))    # 빈 날이 이만큼 연속되면 그만
 
 API = "https://cgv.co.kr/api/v1/booking/"
 KST = timezone(timedelta(hours=9))
@@ -68,20 +70,20 @@ def find_mov_no():
     return MOV_FALLBACK
 
 
-# ---------------- 2) 예매 가능 날짜
-def get_dates(mov_no):
-    st, js = api("searchSiteScnscYmdListByMov",
-                 {"coCd": CO, "movNo": mov_no, "siteNo": SITE,
-                  "div": "CUST_EXPO_MOVTYP_CD", "attrCd": IMAX_ATTR})
-    if st != 200 or not js:
-        log(f"날짜 조회 실패 (status={st})")
-        return []
-    out = []
-    for rec in js.get("data") or []:
-        y = str((rec or {}).get("scnYmd") or "")
-        if re.fullmatch(r"20\d{6}", y):
-            out.append(y)
-    return sorted(set(out))
+# ---------------- 2) 예매 가능 날짜 (참고용 — 이 목록은 늦게 갱신될 수 있어 믿지 않는다)
+def peek_date_list(mov_no):
+    out = {}
+    for tag, extra in (("IMAX필터", {"div": "CUST_EXPO_MOVTYP_CD", "attrCd": IMAX_ATTR}),
+                       ("필터없음", {})):
+        params = {"coCd": CO, "movNo": mov_no, "siteNo": SITE}
+        params.update(extra)
+        st, js = api("searchSiteScnscYmdListByMov", params)
+        got = []
+        if st == 200 and js:
+            got = sorted({str((r or {}).get("scnYmd") or "") for r in (js.get("data") or [])} - {""})
+        out[tag] = got
+        log(f"  [참고] 날짜목록({tag}) {len(got)}일" + (f" {got[0]}~{got[-1]}" if got else ""))
+    return out
 
 
 # ---------------- 3) 회차(시간) — 파라미터 자동 탐색
@@ -211,8 +213,19 @@ def notify(new, total, mode):
     body = json.dumps(card, ensure_ascii=False).encode("utf-8")
     req = request.Request(WEBHOOK, data=body,
                           headers={"Content-Type": "application/json; charset=utf-8"})
-    with request.urlopen(req, timeout=30) as r:
-        log(f"✅ Teams 알림 전송 (응답 {r.status})")
+    try:
+        with request.urlopen(req, timeout=30) as r:
+            resp = r.read().decode("utf-8", "replace")[:300]
+            log(f"✅ Teams 알림 전송 (응답 {r.status}) {resp}")
+    except error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        log(f"❌ Teams 알림 실패 (HTTP {e.code}) {detail}")
+    except Exception as e:
+        log(f"❌ Teams 알림 실패: {type(e).__name__} {e}")
 
 
 def heartbeat(total, mode, dates):
@@ -250,49 +263,74 @@ def heartbeat(total, mode, dates):
         log(f"이상없음 알림 실패: {type(e).__name__}")
 
 
+def collect_slots(mov):
+    """오늘부터 하루씩 직접 물어보며 IMAX 회차를 모은다 (날짜 목록에 의존하지 않음)."""
+    today = datetime.now(KST).date()
+    scope = [None]
+    slots = set()
+    empty = 0
+    last_hit = None
+    asked = 0
+
+    for i in range(RANGE_DAYS):
+        ymd = (today + timedelta(days=i)).strftime("%Y%m%d")
+        times = times_for(mov, ymd, scope)
+        asked += 1
+        if times:
+            empty = 0
+            last_hit = ymd
+            for t in times:
+                slots.add(f"{ymd} {t}")
+            log(f"   {pretty(ymd)} → IMAX {len(times)}회차 {times}")
+        else:
+            empty += 1
+            if slots and empty >= EMPTY_STOP:
+                log(f"   {pretty(ymd)} 이후 {EMPTY_STOP}일 연속 없음 → 여기서 중단")
+                break
+        if scope[0] is None and i >= 4:
+            log("   ⚠️ 시간표 창구가 계속 안 열려요 (rtctlScopCd 미확정)")
+            break
+
+    log(f"   조회한 날짜 {asked}일 · 마지막 상영일 {pretty(last_hit) if last_hit else '-'}")
+    return slots, scope[0]
+
+
 # ---------------- main
 def main():
     log(f"감시: {SITE_NM}({SITE}) / {MOVIE} / {SCREEN}")
     mov = find_mov_no()
-    dates = get_dates(mov)
-    if not dates:
-        log("❌ 예매 가능 날짜를 못 받았어요. 이번 회차는 건너뜁니다.")
-        return
-    log(f"예매 가능 날짜 {len(dates)}일: {dates[0]} ~ {dates[-1]}")
+    peek_date_list(mov)          # 참고용 (문제 추적에 도움)
 
-    scope = [None]
-    slots, mode = set(), "날짜 기준"
-    for ymd in dates:
-        ts = times_for(mov, ymd, scope)
-        if ts:
-            mode = "회차 기준"
-            for t in ts:
-                slots.add(f"{ymd} {t}")
-        else:
-            slots.add(f"{ymd} ")
-    if scope[0] is None:
-        log("시간표 창구는 아직 못 열었어요 → 날짜 단위로 감시합니다 (충분히 동작해요)")
-    elif _seen_halls:
-        log("상영관 판정 결과:")
-        for hall, verdict in sorted(_seen_halls.items()):
-            log(f"   {verdict}  {hall}")
-    log(f"이번 확인: {len(slots)}건 ({mode})")
+    slots, scope = collect_slots(mov)
+    if not slots:
+        log("❌ 회차를 하나도 못 받았어요. 이번은 건너뜁니다 (기록은 그대로 둠).")
+        return
+
+    mode = "회차 기준"
+    log(f"이번 확인: {len(slots)}건 · 상영관 판정: " +
+        ", ".join(f"{v} {k}" for k, v in sorted(_seen_halls.items())))
 
     known = load()
     new = slots - known
+    gone = known - slots
+
     if not known:
         log("첫 실행 → 지금 상태를 기준으로 저장만 (알림 없음)")
         save(slots)
-        heartbeat(len(slots), mode, dates)
+        heartbeat(len(slots), mode, sorted({s.split()[0] for s in slots}))
         return
+
     if new:
-        log(f"🎉 새로 열린 것 {len(new)}건: {sorted(new)[:10]}")
+        log(f"🎉 새로 열린 것 {len(new)}건")
+        for x in sorted(new):
+            log(f"   + {x}")
         notify(new, len(slots), mode)
     else:
-        log("변화 없음")
-        heartbeat(len(slots), mode, dates)
+        log(f"변화 없음 (지나간 회차 {len(gone)}건 정리)")
+        heartbeat(len(slots), mode, sorted({s.split()[0] for s in slots}))
+
     if slots != known:
-        save(slots if mode == "회차 기준" else (known | slots))
+        save(slots)
 
 
 if __name__ == "__main__":
